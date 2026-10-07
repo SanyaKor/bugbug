@@ -5,7 +5,7 @@ from typing import Any
 from uuid import UUID
 
 from hackbot_client import HackbotClient
-from pydantic import AliasChoices, BaseModel, Field
+from pydantic import AliasChoices, BaseModel, Field, Json, ConfigDict, validate_call
 from slack_bolt.context.ack.async_ack import AsyncAck
 from slack_bolt.context.async_context import AsyncBoltContext
 from slack_bolt.context.respond.async_respond import AsyncRespond
@@ -30,15 +30,31 @@ class StartAgentRunValue(BaseModel):
     # A run whose pending actions will be applied before the new run starts.
     apply_run_id: UUID | None = None
 
+class SlackUser(BaseModel):
+    """User who started a Slack interaction.
+    """
+    id: str | None = None
+
+class SlackClickPayload(BaseModel):
+    """The Slack payload received when a button is clicked.
+        https://docs.slack.dev/reference/interaction-payloads/block_actions-payload/
+    """
+    user: SlackUser | None = None
+
+class SlackClickAction(BaseModel):
+    """The action that starts an agent run.
+        https://docs.slack.dev/reference/interaction-payloads/block_actions-payload/
+    """
+    value: Json[StartAgentRunValue]
 
 def _run_url(run_id: UUID) -> str:
     return f"{settings.hackbot_ui_url}/runs/{run_id}"
 
-
+@validate_call(config=ConfigDict(arbitrary_types_allowed=True))
 async def start_agent_run_callback(
     ack: AsyncAck,
-    action: dict,
-    body: dict,
+    action: SlackClickAction,
+    body: SlackClickPayload,
     context: AsyncBoltContext,
     respond: AsyncRespond,
     logger: logging.Logger,
@@ -50,8 +66,8 @@ async def start_agent_run_callback(
     should be fixed with https://github.com/mozilla/bugbug/issues/6468.
     """
     client: HackbotClient = context["hackbot_client"]
-    user = (body.get("user") or {}).get("id")
-    value = StartAgentRunValue.model_validate_json(action["value"])
+    user = body.user.id if body.user is not None else None
+    value = action.value
 
     if value.apply_run_id:
         actions = await client.apply_actions(value.apply_run_id)
