@@ -17,12 +17,16 @@ import contextlib
 import inspect
 import logging
 import os
+from functools import cache
 from collections.abc import Callable, Iterator
 from pathlib import Path
 from typing import TYPE_CHECKING
 
 from opentelemetry import trace as otel_trace
 from opentelemetry.sdk.trace import SpanProcessor, TracerProvider
+
+import weave.conversation.conversation as conversation
+from weave.conversation import agent_context
 
 from hackbot_runtime import wandb_wif
 
@@ -39,6 +43,7 @@ DEFAULT_WEAVE_PROJECT = "hackbot-test"
 # Weave's tagging namespace: the server surfaces this as `attributes.hackbot.run_id`
 # on every call, which the Hackbot UI uses to link a run to its traces.
 RUN_ID_SPAN_ATTRIBUTE = "wandb.attributes.hackbot.run_id"
+SUBAGENT_SPAN_ATTRIBUTE = "wandb.attributes.hackbot.subagent"
 
 
 def resolve_agent_name(entrypoint: Callable) -> str:
@@ -90,6 +95,22 @@ def _tag_spans_with_run_id(run_id: str) -> None:
         provider.add_span_processor(_RunIdSpanProcessor(run_id))
 
 
+@cache
+def _patch_weave_subagent() -> None:
+    original_class = conversation.SubAgent
+
+    class GroupedSubAgent(original_class):
+        def start(self, *, set_current: bool = True):
+            original_name = self.name
+            result = super().start(set_current=set_current)
+
+            self.set_attributes({SUBAGENT_SPAN_ATTRIBUTE: original_name})
+            self.name = agent_context.resolve_agent_name(original_name)
+            return result
+
+    conversation.SubAgent = GroupedSubAgent
+
+
 @contextlib.contextmanager
 def trace_agent(entrypoint: Callable, run_id: str) -> Iterator[None]:
     """Trace the agent run, labelled with the agent's name and tagged with the run id.
@@ -99,6 +120,11 @@ def trace_agent(entrypoint: Callable, run_id: str) -> Iterator[None]:
     if not _init_weave():
         yield
         return
+
+    try:
+        _patch_weave_subagent()
+    except Exception:
+        log.exception("Failed to patch Weave subagent tracing")
 
     from weave.conversation import agent_name_override
 
